@@ -2,6 +2,8 @@
 
 *Diwar* (wall) + *Rang* (colour).
 
+**Live:** https://diwarrang.vercel.app
+
 Try paint colours on a photo of your house or wall before you buy any paint.
 
 - **Upload** a photo (or use the built-in sample house). It's scaled to a 1600px long edge, and phone photos are rotated correctly.
@@ -10,6 +12,7 @@ Try paint colours on a photo of your house or wall before you buy any paint.
   - **Shape**: tap the corners of a polygon.
   - **Brush / Erase**: touch up the edges.
   - Add or Remove mode, and undo/redo.
+- **Start over**: **Reset colours** unpaints every section in the current scheme, and **Reset shapes** clears every selection but keeps your sections and colours. Both can be undone.
 - **Paint realistically**: the paint colour replaces hue and chroma, while the photo's own lightness (shadows, texture) is kept. Each section has its own paint strength.
 - **Colour schemes**: several colour sets per photo, so you can switch and compare them.
 - **Compare**: drag a before/after slider. **Export** downloads a PNG.

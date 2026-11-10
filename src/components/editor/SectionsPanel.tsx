@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Eraser, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { Eraser, MoreHorizontal, PaintRoller, Pencil, Plus, Shapes, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import { SECTION_NAME_IDEAS } from "@/lib/palette";
 import { cn } from "@/lib/utils";
 import { useActiveScheme, useEditor } from "@/store/editor";
@@ -41,7 +42,13 @@ export function SectionsPanel({ onPickColor }: { onPickColor: () => void }) {
   const deleteSection = useEditor((s) => s.deleteSection);
   const clearSection = useEditor((s) => s.clearSection);
   const setTool = useEditor((s) => s.setTool);
+  const resetColors = useEditor((s) => s.resetColors);
+  const resetShapes = useEditor((s) => s.resetShapes);
+  const undo = useEditor((s) => s.undo);
   const scheme = useActiveScheme();
+  const hasColors = !!scheme && Object.keys(scheme.colors).length > 0;
+
+  const withUndo = (message: string) => toast(message, { action: { label: "Undo", onClick: undo } });
 
   const [adding, setAdding] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -60,6 +67,36 @@ export function SectionsPanel({ onPickColor }: { onPickColor: () => void }) {
           New
         </Button>
       </div>
+
+      {sections.length > 0 && (
+        <div className="grid grid-cols-2 gap-2">
+          <Button
+            variant="outline"
+            className="h-10"
+            disabled={!hasColors}
+            onClick={() => {
+              resetColors();
+              withUndo(`Colours removed from “${scheme?.name}”`);
+            }}
+            title="Unpaint every section in this scheme. Selections stay."
+          >
+            <PaintRoller data-icon="inline-start" />
+            Reset colours
+          </Button>
+          <Button
+            variant="outline"
+            className="h-10"
+            onClick={() => {
+              resetShapes();
+              withUndo("All selections cleared");
+            }}
+            title="Clear every section's selected area. Sections and colours stay."
+          >
+            <Shapes data-icon="inline-start" />
+            Reset shapes
+          </Button>
+        </div>
+      )}
 
       {sections.length === 0 ? (
         <div className="rounded-xl border border-dashed p-5 text-center text-sm text-muted-foreground">

@@ -14,7 +14,7 @@ import {
 } from "@/lib/db";
 import { computeEdges, floodFill, textureMap } from "@/lib/floodFill";
 import { canvasThumb, loadPixels } from "@/lib/image";
-import { combineMask, fillPolygon, stampLine, type MaskMode, type Point } from "@/lib/mask";
+import { combineMask, fillPolygon, isMaskEmpty, stampLine, type MaskMode, type Point } from "@/lib/mask";
 import { STARTER_COLORS } from "@/lib/palette";
 import type { ProjectDoc, Scheme, SectionColor, Tool } from "@/lib/types";
 
@@ -28,9 +28,12 @@ export interface ImageState {
 }
 
 interface HistoryEntry {
-  sectionId: string;
-  /** Mask to restore. Arrays in history are never mutated. */
-  mask: Uint8Array;
+  /** Masks to restore, by section. Arrays in history are never mutated. */
+  masks?: Record<string, Uint8Array>;
+  /** Scheme colours to restore. */
+  colors?: { schemeId: string; colors: Record<string, SectionColor> };
+  /** Section to select after undo/redo. */
+  focus?: string;
 }
 
 const HISTORY_LIMIT = 15;
@@ -77,6 +80,10 @@ interface EditorState {
   setSectionColor: (id: string, hex: string) => void;
   setSectionOpacity: (id: string, opacity: number) => void;
   removeSectionColor: (id: string) => void;
+  /** Unpaints every section in the active scheme (undoable). */
+  resetColors: () => void;
+  /** Clears every section's selection, keeping sections and colours (undoable). */
+  resetShapes: () => void;
 
   addScheme: (name: string, copyActive: boolean) => void;
   renameScheme: (id: string, name: string) => void;
@@ -152,17 +159,46 @@ export const useEditor = create<EditorState>()((set, get) => {
     return new Uint8Array(img ? img.width * img.height : 0);
   };
 
+  const pushHistory = (entry: HistoryEntry) =>
+    set({ undoStack: [...get().undoStack, entry].slice(-HISTORY_LIMIT), redoStack: [] });
+
   /** Replaces a section mask, recording undo. `before` must not be mutated afterwards. */
   const commitMask = (sectionId: string, before: Uint8Array, next: Uint8Array) => {
-    const { masks, undoStack } = get();
     dirtyMasks.add(sectionId);
-    set({
-      masks: { ...masks, [sectionId]: next },
-      versions: bump([sectionId]),
-      undoStack: [...undoStack, { sectionId, mask: before }].slice(-HISTORY_LIMIT),
-      redoStack: [],
-    });
+    set({ masks: { ...get().masks, [sectionId]: next }, versions: bump([sectionId]) });
+    pushHistory({ masks: { [sectionId]: before }, focus: sectionId });
     scheduleSave();
+  };
+
+  /** Applies a history entry and returns its inverse (for the opposite stack). */
+  const applyEntry = (entry: HistoryEntry): HistoryEntry => {
+    const inverse: HistoryEntry = { focus: entry.focus };
+    const project = get().project;
+    if (entry.masks) {
+      const masks = { ...get().masks };
+      const restored: Record<string, Uint8Array> = {};
+      for (const [id, mask] of Object.entries(entry.masks)) {
+        if (!project?.sections.some((s) => s.id === id)) continue;
+        restored[id] = masks[id] ?? emptyMask();
+        masks[id] = mask;
+        dirtyMasks.add(id);
+      }
+      inverse.masks = restored;
+      set({ masks, versions: bump(Object.keys(restored)) });
+    }
+    if (entry.colors && project?.schemes.some((s) => s.id === entry.colors!.schemeId)) {
+      const { schemeId, colors } = entry.colors;
+      const scheme = project.schemes.find((s) => s.id === schemeId)!;
+      inverse.colors = { schemeId, colors: scheme.colors };
+      updateProject((p) => ({
+        ...p,
+        activeSchemeId: schemeId,
+        schemes: p.schemes.map((s) => (s.id === schemeId ? { ...s, colors } : s)),
+      }));
+    }
+    if (entry.focus && project?.sections.some((s) => s.id === entry.focus)) set({ activeSectionId: entry.focus });
+    scheduleSave();
+    return inverse;
   };
 
   const applyMask = (sectionId: string, src: Uint8Array, mode: MaskMode) => {
@@ -297,10 +333,19 @@ export const useEditor = create<EditorState>()((set, get) => {
       delete masks[id];
       dirtyMasks.delete(id);
       const remaining = get().project?.sections ?? [];
+      const forget = (stack: HistoryEntry[]) =>
+        stack
+          .map((e) => {
+            if (!e.masks || !(id in e.masks)) return e;
+            const rest = { ...e.masks };
+            delete rest[id];
+            return { ...e, masks: rest, focus: e.focus === id ? undefined : e.focus };
+          })
+          .filter((e) => e.colors || (e.masks && Object.keys(e.masks).length > 0));
       set({
         masks,
-        undoStack: get().undoStack.filter((e) => e.sectionId !== id),
-        redoStack: get().redoStack.filter((e) => e.sectionId !== id),
+        undoStack: forget(get().undoStack),
+        redoStack: forget(get().redoStack),
         activeSectionId: get().activeSectionId === id ? (remaining[remaining.length - 1]?.id ?? null) : get().activeSectionId,
       });
       deleteMask(p.id, id).catch(() => {});
@@ -335,6 +380,36 @@ export const useEditor = create<EditorState>()((set, get) => {
         delete colors[id];
         return { ...s, colors };
       }),
+
+    resetColors: () => {
+      const p = get().project;
+      if (!p) return;
+      const scheme = activeScheme(p);
+      if (Object.keys(scheme.colors).length === 0) return;
+      pushHistory({ colors: { schemeId: scheme.id, colors: scheme.colors } });
+      updateActiveScheme((s) => ({ ...s, colors: {} }));
+    },
+
+    resetShapes: () => {
+      const { project, masks } = get();
+      if (!project) return;
+      if (stroke) get().cancelStroke();
+      const before: Record<string, Uint8Array> = {};
+      const next = { ...masks };
+      for (const s of project.sections) {
+        const m = masks[s.id];
+        if (!m || isMaskEmpty(m)) continue;
+        before[s.id] = m;
+        next[s.id] = emptyMask();
+        dirtyMasks.add(s.id);
+      }
+      const ids = Object.keys(before);
+      set({ polygon: [] });
+      if (ids.length === 0) return;
+      set({ masks: next, versions: bump(ids) });
+      pushHistory({ masks: before });
+      scheduleSave();
+    },
 
     addScheme: (name, copyActive) =>
       updateProject((p) => {
@@ -421,35 +496,23 @@ export const useEditor = create<EditorState>()((set, get) => {
     },
 
     undo: () => {
-      const { undoStack, redoStack, masks } = get();
+      const { undoStack } = get();
       const entry = undoStack[undoStack.length - 1];
       if (!entry) return;
-      const current = masks[entry.sectionId] ?? emptyMask();
-      dirtyMasks.add(entry.sectionId);
-      set({
-        masks: { ...masks, [entry.sectionId]: entry.mask },
-        versions: bump([entry.sectionId]),
-        undoStack: undoStack.slice(0, -1),
-        redoStack: [...redoStack, { sectionId: entry.sectionId, mask: current }],
-        activeSectionId: entry.sectionId,
-      });
-      scheduleSave();
+      if (stroke) get().cancelStroke();
+      set({ undoStack: undoStack.slice(0, -1) });
+      const inverse = applyEntry(entry);
+      set({ redoStack: [...get().redoStack, inverse] });
     },
 
     redo: () => {
-      const { undoStack, redoStack, masks } = get();
+      const { redoStack } = get();
       const entry = redoStack[redoStack.length - 1];
       if (!entry) return;
-      const current = masks[entry.sectionId] ?? emptyMask();
-      dirtyMasks.add(entry.sectionId);
-      set({
-        masks: { ...masks, [entry.sectionId]: entry.mask },
-        versions: bump([entry.sectionId]),
-        redoStack: redoStack.slice(0, -1),
-        undoStack: [...undoStack, { sectionId: entry.sectionId, mask: current }],
-        activeSectionId: entry.sectionId,
-      });
-      scheduleSave();
+      if (stroke) get().cancelStroke();
+      set({ redoStack: redoStack.slice(0, -1) });
+      const inverse = applyEntry(entry);
+      set({ undoStack: [...get().undoStack, inverse].slice(-HISTORY_LIMIT) });
     },
   };
 });
